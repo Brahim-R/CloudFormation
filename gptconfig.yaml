@@ -1,0 +1,162 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Provision VPC, Autoscaling Group (2 EC2s), RDS MySQL, and S3
+
+Parameters:
+  KeyName:
+    Description: Existing KeyPair name for SSH
+    Type: AWS::EC2::KeyPair::KeyName
+
+Resources:
+
+  ### VPC ###
+  BRVPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: 10.0.0.0/16
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+      Tags:
+        - Key: Name
+          Value: MyVPC
+
+  ### Subnet ###
+  PublicSubnet:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref BRVPC
+      CidrBlock: 10.0.1.0/24
+      MapPublicIpOnLaunch: true
+      AvailabilityZone: !Select [ 0, !GetAZs '' ]
+
+  PublicSubnet2:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref BRVPC
+      CidrBlock: 10.0.2.0/24
+      MapPublicIpOnLaunch: true
+      AvailabilityZone: !Select [1, !GetAZs '']
+
+
+  ### Internet Gateway ###
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+
+  AttachGateway:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref BRVPC
+      InternetGatewayId: !Ref InternetGateway
+
+  ### Route Table ###
+  RouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref BRVPC
+
+  PublicRoute:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref RouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+
+  SubnetRouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnet
+      RouteTableId: !Ref RouteTable
+
+  ### Security Group ###
+  InstanceSG:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Allow SSH and HTTP
+      VpcId: !Ref BRVPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp: 0.0.0.0/0
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+
+  ### Launch Template ###
+  MyLaunchTemplate:
+    Type: AWS::EC2::LaunchTemplate
+    Properties:
+      LaunchTemplateData:
+        InstanceType: t2.micro
+        ImageId: ami-05ffe3c48a9991133  # Update per region
+        KeyName: !Ref KeyName
+        SecurityGroupIds:
+          - !Ref InstanceSG
+        UserData:
+          Fn::Base64: |
+            #!/bin/bash
+            cd /tmp
+            sudo yum update
+            yum install -y "https://s3.amazonaws.com/ec2-downloads-windows/SSMAgent/latest/linux_amd64/amazon-ssm-agent.rpm"
+            systemctl enable amazon-ssm-agent
+            systemctl start amazon-ssm-agent
+            cd
+            sudo yum install -y httpd
+            systemctl enable httpd
+            systemctl start httpd
+
+  ### Auto Scaling Group ###
+  MyASG:
+    Type: AWS::AutoScaling::AutoScalingGroup
+    Properties:
+      VPCZoneIdentifier:
+        - !Ref PublicSubnet
+      LaunchTemplate:
+        LaunchTemplateId: !Ref MyLaunchTemplate
+        Version: !GetAtt MyLaunchTemplate.LatestVersionNumber
+      MinSize: "2"
+      MaxSize: "2"
+      DesiredCapacity: "2"
+
+  ### RDS DB Subnet Group ###
+  MyDBSubnetGroup:
+    Type: AWS::RDS::DBSubnetGroup
+    Properties:
+      DBSubnetGroupDescription: Subnet group for MySQL
+      SubnetIds:
+        - !Ref PublicSubnet
+        - !Ref PublicSubnet2
+
+  ### RDS MySQL ###
+  MyDB:
+    Type: AWS::RDS::DBInstance
+    Properties:
+      DBInstanceClass: db.t3.micro
+      AllocatedStorage: 20
+      Engine: mysql
+      EngineVersion: "8.0"
+      MasterUsername: admin
+      MasterUserPassword: Admin12345!
+      DBSubnetGroupName: !Ref MyDBSubnetGroup
+      VPCSecurityGroups:
+        - !Ref InstanceSG
+      PubliclyAccessible: true
+
+  ### S3 Bucket ###
+  MyS3Bucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub ideaboost-${AWS::AccountId}-${AWS::Region}
+
+Outputs:
+  BucketName:
+    Value: !Ref MyS3Bucket
+    Description: Name of the S3 bucket
+
+  ASGInfo:
+    Value: !Ref MyASG
+    Description: Auto Scaling Group resource
+
+  RDSInfo:
+    Value: !Ref MyDB
+    Description: RDS MySQL Instance
